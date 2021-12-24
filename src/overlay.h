@@ -22,7 +22,7 @@ struct frame_stat {
    uint64_t stats[OVERLAY_PLOTS_MAX];
 };
 
-static const int kMaxGraphEntries = 50;
+static const int kMaxGraphEntries = 200;
 
 struct swapchain_stats {
    uint64_t n_frames;
