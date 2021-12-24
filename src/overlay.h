@@ -25,7 +25,7 @@ struct frame_stat {
    uint64_t stats[OVERLAY_PLOTS_MAX];
 };
 
-static const int kMaxGraphEntries = 50;
+static const int kMaxGraphEntries = 200;
 
 enum EngineTypes
 {

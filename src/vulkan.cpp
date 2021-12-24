@@ -1999,3 +1999,11 @@ extern "C" VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL overlay_GetI
    if (instance_data->vtable.GetInstanceProcAddr == NULL) return NULL;
    return instance_data->vtable.GetInstanceProcAddr(instance, funcName);
 }
+
+extern "C" VK_LAYER_EXPORT VKAPI_ATTR void VKAPI_CALL overlay_SetMetrics(const char** names, const float *metrics, size_t count)
+{
+  std::lock_guard<std::mutex> l(currentLogDataMutex);
+  for (size_t i = 0; i != count; ++i) {
+    currentLogData.custom_metrics[names[i]] = metrics[i];
+  }
+}

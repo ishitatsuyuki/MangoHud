@@ -8,6 +8,7 @@
 #include <chrono>
 #include <thread>
 #include <condition_variable>
+#include <unordered_map>
 
 #include "timing.hpp"
 
@@ -26,6 +27,7 @@ struct logData{
   int gpu_power;
   float gpu_vram_used;
   float ram_used;
+  unordered_map<string, float> custom_metrics;
 
   Clock::duration previous;
 };
@@ -74,6 +76,7 @@ extern bool sysInfoFetched;
 extern double fps;
 extern uint64_t frametime;
 extern logData currentLogData;
+extern std::mutex currentLogDataMutex;
 
 string exec(string command);
 void autostart_log(int sleep);
