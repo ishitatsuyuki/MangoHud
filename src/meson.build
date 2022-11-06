@@ -54,6 +54,7 @@ vklayer_files = files(
   'vulkan.cpp',
   'blacklist.cpp',
   'file_utils.cpp',
+  'amdgpu.cpp',
 )
 opengl_files  = []
 if ['windows', 'mingw'].contains(host_machine.system())
@@ -81,12 +82,13 @@ if is_unixy
     'pci_ids.cpp',
     'battery.cpp',
     'control.cpp',
+    'gamepad.cpp',
   )
 
   opengl_files = files(
     'gl/glad.c',
-    'gl/imgui_impl_opengl3.cpp',
-    'gl/imgui_hud.cpp',
+    'gl/gl_renderer.cpp',
+    'gl/gl_hud.cpp',
     'gl/inject_egl.cpp',
   )
 
@@ -98,7 +100,7 @@ if is_unixy
   if get_option('with_nvml') == 'system'
     nvml_h_found = cc.has_header('nvml.h')
     if not nvml_h_found
-      error('nvml.h was not found. Disable with \'-Dwith_nvml=disabled\' if gpu stats by NVML is not needed.')
+      error('nvml.h was not found. Disable with \'-Dwith_nvml=disabled\' if gpu stats by NVML are not needed.')
     endif
     pre_args += '-DUSE_SYSTEM_NVML'
   endif
@@ -119,7 +121,7 @@ if is_unixy
 
     xnvctrl_h_found = cc.has_header('NVCtrl/NVCtrl.h')
     if not xnvctrl_h_found
-      error('NVCtrl.h was not found. Disable with \'-Dwith_xnvctrl=disabled\' if gpu stats by XNVCtrl is not needed.')
+      error('NVCtrl.h was not found. Disable with \'-Dwith_xnvctrl=disabled\' if gpu stats by XNVCtrl are not needed.')
     endif
 
     pre_args += '-DHAVE_XNVCTRL'
@@ -150,16 +152,6 @@ if is_unixy
       'loaders/loader_dbus.cpp',
     )
   endif
-
-#  if get_option('with_libdrm_amdgpu').enabled() and dep_libdrm.found() and dep_libdrm_amdgpu.found()
-  if get_option('with_libdrm_amdgpu').enabled() and dep_libdrm.found()
-    pre_args += '-DHAVE_LIBDRM_AMDGPU'
-    #if dep_xcb.found() and dep_xcb_dri2.found()
-      vklayer_files += files(
-        'loaders/loader_libdrm.cpp',
-      )
-    #endif
-  endif
 endif
 
 link_args = cc.get_supported_link_arguments(['-Wl,-Bsymbolic-functions', '-Wl,-z,relro', '-Wl,--exclude-libs,ALL', '-lGL'])
@@ -188,8 +180,6 @@ vklayer_mesa_overlay = shared_library(
     vulkan_wsi_deps,
     dearimgui_dep,
     spdlog_dep,
-    dep_libdrm,
-    #dep_libdrm_amdgpu,
     dbus_dep,
     dep_dl,
     dep_rt,
@@ -253,34 +243,73 @@ if get_option('mangoapp') and sizeof_ptr == 8
       dep_dl,
       spdlog_dep,
       dbus_dep,
-      dep_libdrm,
       dep_x11,
       glfw3_dep,
+      json_dep,
     ],
     include_directories : [inc_common],
+    install_tag : 'mangoapp',
     link_args : link_args,
+    install : true
+  )
+endif
+
+if get_option('mangohudctl') and sizeof_ptr == 8
+mangoapp = executable(
+  'mangohudctl',
+  files('app/control.cpp'),
+  install_tag : 'mangoapp', #TODO MangoHud layer itself currently doesn't support it
+  install : true
+)
+endif
+
+if get_option('mangoapp_layer')
+  pre_args += '-DMANGOAPP_LAYER'
+  mangoapp_layer = shared_library(
+    'MangoApp',
+    vk_enum_to_str,
+    files(
+      'app/layer.cpp',
+    ),
+    c_args : [
+      pre_args,
+      no_override_init_args,
+      ],
+    cpp_args : [
+      pre_args,
+      ],
+    dependencies : [
+      json_dep
+    ],
+    gnu_symbol_visibility : 'hidden',
+    include_directories : [inc_common],
+    link_args : link_args,
+    install_tag : 'mangoapp',
+    install_dir : libdir_mangohud,
     install : true
   )
 endif
 
 configure_file(input : 'mangohud.json.in',
   output : '@0@.json'.format(meson.project_name()),
-  configuration : {'ld_libdir_mangohud' : ld_libdir_mangohud_vk,
+  configuration : {'ld_libdir_mangohud' : ld_libdir_mangohud_vk.replace('\$', '$'),
                   'PROJECT_NAME' : meson.project_name().to_upper()},
   install : true,
   install_dir : join_paths(get_option('datadir'), 'vulkan', 'implicit_layer.d'),
+  install_tag : 'runtime',
 )
 
 configure_file(input : '../bin/mangohud.in',
   output : 'mangohud',
   configuration : conf_data,
   install_dir : get_option('bindir'),
+  install_tag : 'scripts',
 )
 
-if get_option('include_doc')
-  install_data(
-    files('../bin/MangoHud.conf'),
-    install_dir : join_paths(get_option('datadir'), 'doc', 'mangohud'),
-    rename : ['MangoHud.conf.example']
-  )
-endif
+configure_file(input : 'app/layer.json.in',
+  output : 'libMangoApp.json',
+  configuration : {'ld_libdir_mangohud' : ld_libdir_mangohud_vk.replace('\$', '$')},
+  install : true,
+  install_dir : join_paths(get_option('datadir'), 'vulkan', 'implicit_layer.d'),
+  install_tag : 'mangoapp',
+)

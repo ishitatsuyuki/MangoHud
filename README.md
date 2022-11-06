@@ -49,7 +49,6 @@ Install necessary development packages.
 - vulkan headers if using `-Duse_system_vulkan=enabled` option with `meson`
 - libGL/libEGL (libglvnd, mesa-common-dev, mesa-libGL-devel etc)
 - X11 (libx11-dev)
-- libdrm (libdrm-dev)
 - XNVCtrl (libxnvctrl-dev), optional, use `-Dwith_xnvctrl=disabled` option with `meson` to disable
 - D-Bus (libdbus-1-dev), optional, use `-Dwith_dbus=disabled` option with `meson` to disable
 
@@ -276,7 +275,7 @@ You can also customize the hud by using the `MANGOHUD_CONFIG` environment variab
 You can also specify configuration file with `MANGOHUD_CONFIGFILE=/path/to/config` for applications whose names are hard to guess (java, python etc).
 
 A partial list of parameters are below. See the config file for a complete list.
-Parameters that are enabled by default have to be explicitly disabled. These (currently) are `fps`, `frame_timing`, `cpu_stats` (cpu load), `gpu_stats` (gpu load).
+Parameters that are enabled by default have to be explicitly disabled. These (currently) are `fps`, `frame_timing`, `cpu_stats` (cpu load), `gpu_stats` (gpu load), and each can be disabled by setting the corresponding variable to 0 (e.g., fps=0).
 
 | Variable                           | Description                                                                           |
 |------------------------------------|---------------------------------------------------------------------------------------|
@@ -340,6 +339,7 @@ Parameters that are enabled by default have to be explicitly disabled. These (cu
 | `core_load_change`                 | Changes the colors of cpu core loads, uses the same data from `cpu_load_value` and `cpu_load_change`       |
 | `cellpadding_y`                    | Set the vertical cellpadding, default is `-0.085` |
 | `frametime`                        | Display frametime next to fps text                                                    |
+| `frame_count`                      | Display frame count                                                                   |
 | `table_columns`                    | Set the number of table columns for ImGui, defaults to 3                              |
 | `blacklist`                        | Add a program to the blacklist. e.g `blacklist=vkcube,WatchDogs2.exe`                 |
 | `resolution`                       | Display the current resolution                                                        |
@@ -353,8 +353,9 @@ Parameters that are enabled by default have to be explicitly disabled. These (cu
 | `battery`                          | Display current battery percent and energy consumption                                |
 | `battery_icon`                     | Display battery icon instead of percent                                               |
 | `battery_color`                    | Change the BATT text color                                                            |
-| `force_amdgpu_hwmon`               | Use hwmon sysfs instead of libdrm for amdgpu stats                                    |
-| `fps_only`                         | Show FPS without the engine name e.g. DXVK/VULAKAN etc.                               |
+| `fps_only`                         | Show FPS only. ***Not meant to be used with other display params***                   |
+| `gamepad_battery`                  | Display battey of wireless gamepads (xone,xpadneo,ds4)                                |
+| `gamepad_battery_icon`             | Display gamepad battery percent with icon. *enabled by default                        |
 Example: `MANGOHUD_CONFIG=cpu_temp,gpu_temp,position=top-right,height=500,font_size=32`
 Because comma is also used as option delimiter and needs to be escaped for values with a backslash, you can use `+` like `MANGOHUD_CONFIG=fps_limit=60+30+0` instead.
 

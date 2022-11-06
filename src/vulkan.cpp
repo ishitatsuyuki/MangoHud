@@ -34,27 +34,23 @@
 #include <list>
 #include <array>
 #include <iomanip>
+#include <inttypes.h>
 #include <spdlog/spdlog.h>
+#include <imgui.h>
 
+#include "mesa/util/macros.h" // defines "restrict" for vk_util.h
+#include "mesa/util/os_socket.h"
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
-
-#include "imgui.h"
+#include <vulkan/vk_util.h>
+#include "vk_enum_to_str.h"
 
 #include "overlay.h"
-
-// #include "util/debug.h"
-#include <inttypes.h>
-#include "mesa/util/macros.h"
-#include "mesa/util/os_time.h"
-#include "mesa/util/os_socket.h"
-
-#include "vk_enum_to_str.h"
-#include <vulkan/vk_util.h>
-
 #include "notify.h"
 #include "blacklist.h"
 #include "pci_ids.h"
+
+using namespace std;
 
 float offset_x, offset_y, hudSpacing;
 int hudFirstRow, hudSecondRow;
@@ -66,8 +62,37 @@ namespace MangoHud { namespace GL {
 }}
 #endif
 
-/* Mapped from VkCommandBuffer */
+/* Mapped from VkInstace/VkPhysicalDevice */
+struct instance_data {
+   struct vk_instance_dispatch_table vtable;
+   VkInstance instance;
+   struct overlay_params params;
+   uint32_t api_version;
+   string engineName, engineVersion;
+   enum EngineTypes engine;
+   notify_thread notifier;
+   int control_client;
+};
+
+/* Mapped from VkDevice */
 struct queue_data;
+struct device_data {
+   struct instance_data *instance;
+
+   PFN_vkSetDeviceLoaderData set_device_loader_data;
+
+   struct vk_device_dispatch_table vtable;
+   VkPhysicalDevice physical_device;
+   VkDevice device;
+
+   VkPhysicalDeviceProperties properties;
+
+   struct queue_data *graphic_queue;
+
+   std::vector<struct queue_data *> queues;
+};
+
+/* Mapped from VkCommandBuffer */
 struct command_buffer_data {
    struct device_data *device;
 
@@ -140,6 +165,7 @@ struct swapchain_data {
 
    /**/
    ImGuiContext* imgui_context;
+   ImFontAtlas* font_atlas;
    ImVec2 window_size;
 
    struct swapchain_stats sw_stats;
@@ -220,6 +246,7 @@ static struct instance_data *new_instance_data(VkInstance instance)
    data->instance = instance;
    data->params = {};
    data->params.control = -1;
+   data->control_client = -1;
    map_object(HKEY(data->instance), data);
    return data;
 }
@@ -362,6 +389,7 @@ static struct swapchain_data *new_swapchain_data(VkSwapchainKHR swapchain,
    data->device = device_data;
    data->swapchain = swapchain;
    data->window_size = ImVec2(instance_data->params.width, instance_data->params.height);
+   data->font_atlas = IM_NEW(ImFontAtlas);
    map_object(HKEY(data->swapchain), data);
    return data;
 }
@@ -425,11 +453,11 @@ static void snapshot_swapchain_frame(struct swapchain_data *data)
    struct device_data *device_data = data->device;
    struct instance_data *instance_data = device_data->instance;
    update_hud_info(data->sw_stats, instance_data->params, device_data->properties.vendorID);
-   check_keybinds(data->sw_stats, instance_data->params, device_data->properties.vendorID);
+   check_keybinds(instance_data->params, device_data->properties.vendorID);
 #ifdef __linux__
    if (instance_data->params.control >= 0) {
-      control_client_check(device_data);
-      process_control_socket(instance_data);
+      control_client_check(instance_data->params.control, instance_data->control_client, gpu.c_str());
+      process_control_socket(instance_data->control_client, instance_data->params);
    }
 #endif
 }
@@ -449,11 +477,11 @@ static void compute_swapchain_display(struct swapchain_data *data)
    ImGui::NewFrame();
    {
       ::scoped_lock lk(instance_data->notifier.mutex);
+      overlay_new_frame(instance_data->params);
       position_layer(data->sw_stats, instance_data->params, data->window_size);
       render_imgui(data->sw_stats, instance_data->params, data->window_size, true);
+      overlay_end_frame();
    }
-   ImGui::PopStyleVar(3);
-
    ImGui::EndFrame();
    ImGui::Render();
 
@@ -676,16 +704,15 @@ static void check_fonts(struct swapchain_data* data)
    struct device_data *device_data = data->device;
    struct instance_data *instance_data = device_data->instance;
    auto& params = instance_data->params;
-   ImGuiIO& io = ImGui::GetIO();
 
    if (params.font_params_hash != data->sw_stats.font_params_hash)
    {
       SPDLOG_DEBUG("Recreating font image");
-      VkDescriptorSet desc_set = (VkDescriptorSet)io.Fonts->TexID;
-      create_fonts(instance_data->params, data->sw_stats.font1, data->sw_stats.font_text);
+      VkDescriptorSet desc_set = (VkDescriptorSet)data->font_atlas->TexID;
+      create_fonts(data->font_atlas, instance_data->params, data->sw_stats.font1, data->sw_stats.font_text);
       unsigned char* pixels;
       int width, height;
-      io.Fonts->GetTexDataAsAlpha8(&pixels, &width, &height);
+      data->font_atlas->GetTexDataAsAlpha8(&pixels, &width, &height);
 
       // wait for rendering to complete, if any
       device_data->vtable.DeviceWaitIdle(device_data->device);
@@ -696,7 +723,7 @@ static void check_fonts(struct swapchain_data* data)
       else
          desc_set = create_image_with_desc(data, width, height, VK_FORMAT_R8_UNORM, data->font_image, data->font_mem, data->font_image_view);
 
-      io.Fonts->SetTexID((ImTextureID)desc_set);
+      data->font_atlas->SetTexID((ImTextureID)desc_set);
       data->font_uploaded = false;
       data->sw_stats.font_params_hash = params.font_params_hash;
       SPDLOG_DEBUG("Default font tex size: {}x{}px", width, height);
@@ -714,10 +741,9 @@ static void ensure_swapchain_fonts(struct swapchain_data *data,
       return;
 
    data->font_uploaded = true;
-   ImGuiIO& io = ImGui::GetIO();
    unsigned char* pixels;
    int width, height;
-   io.Fonts->GetTexDataAsAlpha8(&pixels, &width, &height);
+   data->font_atlas->GetTexDataAsAlpha8(&pixels, &width, &height);
    size_t upload_size = width * height * 1 * sizeof(char);
    upload_image_data(device_data, command_buffer, pixels, upload_size, width, height, data->upload_font_buffer, data->upload_font_buffer_mem, data->font_image);
 }
@@ -868,7 +894,7 @@ static struct overlay_draw *render_swapchain_display(struct swapchain_data *data
 #if 1 // disable if using >1 font textures
    VkDescriptorSet desc_set[1] = {
       //data->descriptor_set
-      reinterpret_cast<VkDescriptorSet>(ImGui::GetIO().Fonts->Fonts[0]->ContainerAtlas->TexID)
+      reinterpret_cast<VkDescriptorSet>(data->font_atlas->TexID)
    };
    device_data->vtable.CmdBindDescriptorSets(draw->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                              data->pipeline_layout, 0, 1, desc_set, 0, NULL);
@@ -1282,7 +1308,7 @@ static void setup_swapchain_data(struct swapchain_data *data,
    data->height = pCreateInfo->imageExtent.height;
    data->format = pCreateInfo->imageFormat;
 
-   data->imgui_context = ImGui::CreateContext();
+   data->imgui_context = ImGui::CreateContext(data->font_atlas);
    ImGui::SetCurrentContext(data->imgui_context);
 
    ImGui::GetIO().IniFilename = NULL;
@@ -1439,6 +1465,7 @@ static void shutdown_swapchain_data(struct swapchain_data *data)
    device_data->vtable.DestroySampler(device_data->device, data->font_sampler, NULL);
    shutdown_swapchain_font(data);
 
+   IM_FREE(data->font_atlas);
    ImGui::DestroyContext(data->imgui_context);
 }
 
@@ -1468,16 +1495,19 @@ static VkResult overlay_CreateSwapchainKHR(
     const VkAllocationCallbacks*                pAllocator,
     VkSwapchainKHR*                             pSwapchain)
 {
+   VkSwapchainCreateInfoKHR createInfo = *pCreateInfo;
+
+   createInfo.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
    struct device_data *device_data = FIND(struct device_data, device);
    array<VkPresentModeKHR, 4> modes = {VK_PRESENT_MODE_FIFO_RELAXED_KHR,
            VK_PRESENT_MODE_IMMEDIATE_KHR,
            VK_PRESENT_MODE_MAILBOX_KHR,
            VK_PRESENT_MODE_FIFO_KHR};
-
    if (device_data->instance->params.vsync < 4)
-      const_cast<VkSwapchainCreateInfoKHR*> (pCreateInfo)->presentMode = modes[device_data->instance->params.vsync];
+      createInfo.presentMode = modes[device_data->instance->params.vsync];
 
-   VkResult result = device_data->vtable.CreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+   VkResult result = device_data->vtable.CreateSwapchainKHR(device, &createInfo, pAllocator, pSwapchain);
    if (result != VK_SUCCESS) return result;
    struct swapchain_data *swapchain_data = new_swapchain_data(*pSwapchain, device_data);
    setup_swapchain_data(swapchain_data, pCreateInfo);
@@ -1513,12 +1543,11 @@ static VkResult overlay_CreateSwapchainKHR(
    std::string deviceName = prop.deviceName;
    if (!is_blacklisted()) {
 #ifdef __linux__
-      get_device_name(prop.vendorID, prop.deviceID, swapchain_data->sw_stats);
-      init_system_info();
+      swapchain_data->sw_stats.gpuName = get_device_name(prop.vendorID, prop.deviceID);
 #endif
    }
    swapchain_data->sw_stats.driverName = driverProps.driverInfo;
-   
+
    return result;
 }
 
@@ -1539,17 +1568,6 @@ static void overlay_DestroySwapchainKHR(
    shutdown_swapchain_data(swapchain_data);
    swapchain_data->device->vtable.DestroySwapchainKHR(device, swapchain, pAllocator);
    destroy_swapchain_data(swapchain_data);
-}
-
-void FpsLimiter(struct fps_limit& stats){
-   stats.sleepTime = stats.targetFrameTime - (stats.frameStart - stats.frameEnd);
-   if (stats.sleepTime > stats.frameOverhead) {
-      auto adjustedSleep = stats.sleepTime - stats.frameOverhead;
-      this_thread::sleep_for(adjustedSleep);
-      stats.frameOverhead = ((Clock::now() - stats.frameStart) - adjustedSleep);
-      if (stats.frameOverhead > stats.targetFrameTime / 2)
-         stats.frameOverhead = Clock::duration(0);
-   }
 }
 
 static VkResult overlay_QueuePresentKHR(
@@ -1578,7 +1596,7 @@ static VkResult overlay_QueuePresentKHR(
       struct overlay_draw *draw = before_present(swapchain_data,
                                                    queue_data,
                                                    pPresentInfo->pWaitSemaphores,
-                                                   pPresentInfo->waitSemaphoreCount,
+                                                   i == 0 ? pPresentInfo->waitSemaphoreCount : 0,
                                                    image_index);
 
       /* Because the submission of the overlay draw waits on the semaphores
@@ -1795,6 +1813,10 @@ static VkResult overlay_CreateDevice(
 
    if (!is_blacklisted()) {
       device_map_queues(device_data, pCreateInfo);
+#ifdef __linux__
+      gpu = get_device_name(device_data->properties.vendorID, device_data->properties.deviceID);
+      SPDLOG_DEBUG("gpu: {}", gpu);
+#endif
       init_gpu_stats(device_data->properties.vendorID, device_data->properties.deviceID, device_data->instance->params);
    }
 
@@ -1888,6 +1910,7 @@ static VkResult overlay_CreateInstance(
 
    if (!is_blacklisted()) {
 #ifdef __linux__
+      init_system_info();
       instance_data->notifier.params = &instance_data->params;
       start_notifier(instance_data->notifier);
 #endif
@@ -1929,10 +1952,14 @@ static void overlay_DestroyInstance(
 
 extern "C" VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL overlay_GetDeviceProcAddr(VkDevice dev,
                                                                              const char *funcName);
+extern "C" VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL overlay_GetInstanceProcAddr(VkInstance instance,
+                                                                               const char *funcName);
+
 static const struct {
    const char *name;
    void *ptr;
 } name_to_funcptr_map[] = {
+   { "vkGetInstanceProcAddr", (void *) overlay_GetInstanceProcAddr },
    { "vkGetDeviceProcAddr", (void *) overlay_GetDeviceProcAddr },
 #define ADD_HOOK(fn) { "vk" # fn, (void *) overlay_ ## fn }
 #define ADD_ALIAS_HOOK(alias, fn) { "vk" # alias, (void *) overlay_ ## fn }
@@ -1977,6 +2004,7 @@ static void *find_ptr(const char *name)
 extern "C" VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL overlay_GetDeviceProcAddr(VkDevice dev,
                                                                              const char *funcName)
 {
+   init_spdlog();
    void *ptr = find_ptr(funcName);
    if (ptr) return reinterpret_cast<PFN_vkVoidFunction>(ptr);
 
@@ -1990,6 +2018,7 @@ extern "C" VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL overlay_GetD
 extern "C" VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL overlay_GetInstanceProcAddr(VkInstance instance,
                                                                                const char *funcName)
 {
+   init_spdlog();
    void *ptr = find_ptr(funcName);
    if (ptr) return reinterpret_cast<PFN_vkVoidFunction>(ptr);
 
