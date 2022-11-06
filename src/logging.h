@@ -26,7 +26,7 @@ struct logData{
   int gpu_power;
   float gpu_vram_used;
   float ram_used;
-  unordered_map<string, float> custom_metrics;
+  std::unordered_map<std::string, float> custom_metrics;
 
   Clock::duration previous;
 };
